@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+
+# Local Devploy releases & temporary files
+devploy/
+*.tar.gz
+*.log
+
+# Environment variables & secrets
+.env
+.env.local
+
+# IDE & Editor files
+.vscode/
+.idea/
+.claude/
+.qodo/
+.DS_Store
