@@ -4,7 +4,7 @@ import pc from 'picocolors';
 import { text, password as passwordPrompt, select, confirm, spinner, isCancel, cancel } from '@clack/prompts';
 import { loadConfig, GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_PATH } from '../config/loader.js';
 import { DevployConfig, ProjectConfig, SSHHostConfig } from '../types/index.js';
-import { SSHClientWrapper } from '../utils/ssh.js';
+import { SSHClientWrapper, isKeyEncrypted } from '../utils/ssh.js';
 import { startFlow, endFlow, showSuccessSummaryCard } from '../ui/banner.js';
 
 export async function initCommand() {
@@ -116,6 +116,24 @@ export async function initCommand() {
     if (isCancel(keyPath)) return cancel('Cancelled.');
     hostObj.keyPath = keyPath as string;
     hostObj.passphrase = '${SSH_PASSPHRASE}';
+
+    const expandedKeyPath = (keyPath as string).replace(/^~/, process.env.HOME || '');
+    let isEncrypted = false;
+    if (fs.existsSync(expandedKeyPath)) {
+      try {
+        isEncrypted = isKeyEncrypted(fs.readFileSync(expandedKeyPath));
+      } catch (_) {}
+    }
+
+    if (isEncrypted) {
+      const pass = await passwordPrompt({
+        message: `Enter SSH Key Passphrase (optional, press Enter if managed by ssh-agent):`,
+      });
+      if (isCancel(pass)) return cancel('Cancelled.');
+      if (pass) {
+        testPassphraseOrPassword = (pass as string).trim();
+      }
+    }
   } else {
     const pwd = await passwordPrompt({
       message: `Enter SSH Server Password for ${username}@${host} (for connection test):`,
@@ -136,7 +154,33 @@ export async function initCommand() {
     await testClient.connect(testPassphraseOrPassword || undefined);
     connSuccess = true;
   } catch (err: any) {
-    connError = err.message;
+    const isAuthOrPassphrase =
+      err.message.includes('Encrypted private') ||
+      err.message.includes('passphrase') ||
+      err.message.includes('All configured authentication methods failed') ||
+      err.message.includes('USERAUTH_FAILURE') ||
+      err.message.includes('authentication failed');
+
+    if (isAuthOrPassphrase && !testPassphraseOrPassword) {
+      s.stop(pc.yellow(`⚠️ SSH authentication failed (key may require a passphrase).`));
+      const retryPass = await passwordPrompt({
+        message: `Enter SSH Key Passphrase for ${username}@${host}:`,
+      });
+      if (!isCancel(retryPass) && retryPass) {
+        testPassphraseOrPassword = (retryPass as string).trim();
+        s.start(`Retrying SSH connection to ${username}@${host}...`);
+        try {
+          await testClient.connect(testPassphraseOrPassword);
+          connSuccess = true;
+        } catch (retryErr: any) {
+          connError = retryErr.message;
+        }
+      } else {
+        connError = err.message;
+      }
+    } else {
+      connError = err.message;
+    }
   } finally {
     testClient.close();
   }
@@ -242,7 +286,7 @@ export async function initCommand() {
         deployPath: deployPath as string,
         include: [],
         exclude: ['.git', 'node_modules', '.claude', '.qodo', '.vscode'],
-        keepReleases: 5,
+        keepReleases: 3,
         hooks: detectedHooks,
         healthCheck: healthCheckObj,
       },
@@ -292,4 +336,9 @@ export default defineConfig(${JSON.stringify(finalConfig, null, 2)});
     deployPath: deployPath as string,
     isNewFile: mode !== 'add',
   });
+
+  if (testPassphraseOrPassword) {
+    const envVar = authType === 'key' ? 'SSH_PASSPHRASE' : 'SSH_PASSWORD';
+    console.log(pc.cyan(`\n💡 Tip: To automate future deployments without prompting, export ${envVar}="${testPassphraseOrPassword}" or add it to a .env file.`));
+  }
 }

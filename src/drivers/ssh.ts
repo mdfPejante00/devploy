@@ -8,6 +8,61 @@ import { HostStatus, ReleaseInfo, SSHDeploymentTarget } from '../types/index.js'
 import { SSHClientWrapper } from '../utils/ssh.js';
 import { logger, createSpinner } from '../ui/logger.js';
 
+export function cleanupLocalReleases(workDir: string, maxReleases: number = 3): string[] {
+  const baseDir = path.join(workDir, 'devploy', 'releases');
+  if (!fs.existsSync(baseDir)) return [];
+
+  function findTarFiles(dir: string): { path: string; name: string; mtime: number }[] {
+    let files: { path: string; name: string; mtime: number }[] = [];
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          files = files.concat(findTarFiles(fullPath));
+        } else if (entry.isFile() && entry.name.endsWith('.tar.gz')) {
+          const stat = fs.statSync(fullPath);
+          files.push({ path: fullPath, name: entry.name, mtime: stat.mtimeMs });
+        }
+      }
+    } catch (_) {}
+    return files;
+  }
+
+  function cleanEmptyDirs(dir: string): void {
+    try {
+      if (!fs.existsSync(dir)) return;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          const sub = path.join(dir, entry.name);
+          cleanEmptyDirs(sub);
+          try {
+            if (fs.readdirSync(sub).length === 0) {
+              fs.rmdirSync(sub);
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+
+  const allArchives = findTarFiles(baseDir);
+  allArchives.sort((a, b) => (b.mtime !== a.mtime ? b.mtime - a.mtime : b.name.localeCompare(a.name)));
+
+  const deleted: string[] = [];
+  if (allArchives.length > maxReleases) {
+    const toRemove = allArchives.slice(maxReleases);
+    for (const file of toRemove) {
+      try {
+        fs.unlinkSync(file.path);
+        deleted.push(file.name);
+      } catch (_) {}
+    }
+  }
+
+  cleanEmptyDirs(baseDir);
+  return deleted;
+}
+
 export class SSHDriver extends BaseDriver {
   name = 'ssh';
 
@@ -165,11 +220,19 @@ export class SSHDriver extends BaseDriver {
           }
         }
 
-        // 9. Keep Releases Cleanup
-        const keepCount = sshTarget.keepReleases || 5;
+        // 9. Keep Releases Cleanup on target server
+        const keepCount = sshTarget.keepReleases || 3;
         await client.exec(
-          `cd "${path.join(sshTarget.deployPath, 'releases')}" && ls -dt rel_* | tail -n +${keepCount + 1} | xargs rm -rf`
+          `cd "${path.join(sshTarget.deployPath, 'releases')}" && ls -dt rel_* 2>/dev/null | tail -n +${keepCount + 1} | xargs -r rm -rf`
         );
+      }
+
+      // 10. Keep Releases Cleanup on local machine
+      const keepCount = sshTarget.keepReleases || 3;
+      const prunedLocal = cleanupLocalReleases(workDir, keepCount);
+      if (prunedLocal.length > 0) {
+        s.start(`Pruning old local releases...`);
+        s.stop(pc.green(`✔ Pruned ${prunedLocal.length} old local release archive(s) (keeping latest ${keepCount})`));
       }
 
     } finally {

@@ -1,10 +1,10 @@
 {
   "name": "@chiake/devploy",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Modern & Scalable Node.js Server Deployment CLI",
   "type": "module",
   "bin": {
-    "devploy": "./dist/index.js"
+    "devploy": "dist/index.js"
   },
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",

@@ -32,7 +32,7 @@ export const SSHTargetSchema = z.object({
   driver: z.literal('ssh'),
   hosts: z.array(SSHHostConfigSchema).min(1, 'At least one SSH host is required'),
   deployPath: z.string().min(1, 'Deploy path is required'),
-  keepReleases: z.number().optional().default(5),
+  keepReleases: z.number().optional().default(3),
   include: z.array(z.string()).optional(),
   exclude: z.array(z.string()).optional(),
   hooks: LifecycleHooksSchema.optional(),

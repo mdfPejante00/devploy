@@ -1,12 +1,30 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { Client as SSHClient, ConnectConfig } from 'ssh2';
+import ssh2Pkg from 'ssh2';
+import type { Client as SSHClientType, ConnectConfig } from 'ssh2';
 import { SSHHostConfig } from '../types/index.js';
 import { password, spinner, isCancel } from '@clack/prompts';
 import pc from 'picocolors';
 
+const { Client: SSHClient, utils } = ssh2Pkg;
+
+export function isKeyEncrypted(keyData: Buffer | string): boolean {
+  try {
+    const buf = typeof keyData === 'string' ? Buffer.from(keyData) : keyData;
+    const res = utils.parseKey(buf);
+    if (res instanceof Error) {
+      const msg = res.message.toLowerCase();
+      return msg.includes('encrypted') || msg.includes('passphrase');
+    }
+    return false;
+  } catch (err: any) {
+    const msg = String(err?.message || '').toLowerCase();
+    return msg.includes('encrypted') || msg.includes('passphrase');
+  }
+}
+
 export class SSHClientWrapper {
-  private client: SSHClient;
+  private client: SSHClientType;
   public config: SSHHostConfig;
 
   constructor(config: SSHHostConfig) {
@@ -30,15 +48,28 @@ export class SSHClientWrapper {
 
       if (this.config.keyPath) {
         // Explicit Key Authentication
-        if (agentSocket && !passphraseOverride) {
-          connParams.agent = agentSocket;
-        }
         const expandedPath = this.config.keyPath.replace(/^~/, process.env.HOME || '');
         if (fs.existsSync(expandedPath)) {
-          connParams.privateKey = fs.readFileSync(expandedPath);
-        }
-        if (cleanCredential) {
-          connParams.passphrase = cleanCredential;
+          const keyBuffer = fs.readFileSync(expandedPath);
+          const encrypted = isKeyEncrypted(keyBuffer);
+
+          if (cleanCredential) {
+            // Decrypt with provided passphrase
+            connParams.privateKey = keyBuffer;
+            connParams.passphrase = cleanCredential;
+          } else if (encrypted && agentSocket && !passphraseOverride) {
+            // Key is encrypted and no passphrase provided, but SSH Agent is available.
+            // Delegate to the agent! Do NOT pass privateKey because ssh2 throws synchronously if privateKey cannot be parsed.
+            connParams.agent = agentSocket;
+          } else {
+            // Unencrypted key OR no agent: pass privateKey to let ssh2 authenticate or surface passphrase requirement
+            connParams.privateKey = keyBuffer;
+            if (agentSocket && !passphraseOverride) {
+              connParams.agent = agentSocket;
+            }
+          }
+        } else if (agentSocket) {
+          connParams.agent = agentSocket;
         }
       } else if (cleanCredential) {
         // Explicit Password Authentication
@@ -60,13 +91,23 @@ export class SSHClientWrapper {
         ];
         const existingKey = defaultKeyPaths.find((p) => fs.existsSync(p));
         if (existingKey) {
-          connParams.privateKey = fs.readFileSync(existingKey);
+          const keyBuffer = fs.readFileSync(existingKey);
+          const encrypted = isKeyEncrypted(keyBuffer);
+          // If encrypted and agent is available, do not pass raw privateKey so agent can authenticate
+          if (!encrypted || !agentSocket) {
+            connParams.privateKey = keyBuffer;
+          }
         }
       }
 
       this.client.on('ready', () => resolve());
       this.client.on('error', (err) => reject(new Error(`[${this.config.host}] SSH Connection error: ${err.message}`)));
-      this.client.connect(connParams);
+
+      try {
+        this.client.connect(connParams);
+      } catch (err: any) {
+        reject(new Error(`[${this.config.host}] SSH Connection error: ${err.message}`));
+      }
     });
   }
 
